@@ -106,7 +106,12 @@
             </template>
             <el-table :data="peers" style="width: 100%">
               <el-table-column prop="id" label="ID" width="150" />
-              <el-table-column prop="name" label="名称 (聊天显示)" width="150" />
+              <el-table-column label="名称 (聊天显示)" width="150">
+                <template #default="scope">
+                  {{ scope.row.name }}
+                  <el-tag v-if="scope.row.isObserver" type="info" size="small" style="margin-left: 5px;">旁观者</el-tag>
+                </template>
+              </el-table-column>
               <el-table-column prop="provider" label="服务商" width="150" />
               <el-table-column prop="model" label="模型" width="180" />
               <el-table-column label="系统提示词" width="200">
@@ -139,7 +144,7 @@
             <div class="speaking-order" style="margin-top: 20px;">
               <h3>发言顺序</h3>
               <el-select v-model="speakingOrder" multiple placeholder="选择发言顺序 (仅启用角色)" style="width: 100%;">
-                <el-option v-for="peer in enabledPeersForSpeakingOrder" :key="peer.name" :label="`${peer.name} (${peer.id})`" :value="peer.name" />
+                <el-option v-for="peer in enabledPeersForSpeakingOrder" :key="peer.name" :label="`${peer.name} (${peer.id})${peer.isObserver ? ' (旁观者)' : ''}`" :value="peer.name" />
               </el-select>
             </div>
           </el-card>
@@ -149,19 +154,23 @@
           <div class="chat-messages-container" ref="chatMessagesContainer_ref">
             <div v-for="(message, index) in chatMessages" :key="message.id || index"
                  class="message-wrapper"
-                 :class="{ 'user-message-wrapper': !isAIMessage(message.role), 'ai-message-wrapper': isAIMessage(message.role) }">
+                 :class="{ 'user-message-wrapper': message.role === '用户',
+                           'ai-message-wrapper': isConfiguredPeerMessage(message.role) && !isObserverMessage(message.role),
+                           'observer-message-wrapper': isObserverMessage(message.role) }">
               <div class="message-meta">
-                  <span class="message-role-display">{{ message.role }}</span>
+                  <span class="message-role-display">{{ message.role }}{{ isObserverMessage(message.role) ? ' (旁观)' : '' }}</span>
               </div>
-              <div class="message-bubble">
+              <div class="message-bubble" :class="{'observer-bubble': isObserverMessage(message.role) }">
                 <div class="message-content" v-html="formatMessageContent(message.content)"></div>
               </div>
             </div>
-            <div v-if="isGenerating && liveStreamDisplayContent !== null" class="message-wrapper ai-message-wrapper">
+            <div v-if="isGenerating && liveStreamDisplayContent !== null" 
+                 class="message-wrapper"
+                 :class="getGeneratingPeerIsObserver() ? 'observer-message-wrapper' : 'ai-message-wrapper'">
                 <div class="message-meta">
-                    <span class="message-role-display">{{ peerCurrentlyGenerating }} 正在输入...</span>
+                    <span class="message-role-display">{{ peerCurrentlyGenerating }} {{ getGeneratingPeerIsObserver() ? '(旁观者)' : '' }} 正在输入...</span>
                 </div>
-                <div class="message-bubble">
+                <div class="message-bubble" :class="{'observer-bubble': getGeneratingPeerIsObserver() }">
                     <div class="message-content" v-if="liveStreamDisplayContent" v-html="formatMessageContent(liveStreamDisplayContent)"></div>
                      <div class="message-content" v-else><i>等待数据流...</i></div>
                 </div>
@@ -170,13 +179,24 @@
 
           <div class="chat-input-area">
             <div class="chat-actions">
-              <template v-for="peer in enabledPeersForChat" :key="peer.id">
+              <template v-for="peer in enabledPeersForChatActions" :key="peer.id">
                 <el-button
                   @click="letPeerSpeak(peer.name)"
                   :disabled="isGenerating" size="small">
-                  {{ peer.name }}
+                  {{ peer.name }}{{ peer.isObserver ? ' (旁观)' : '' }}
                 </el-button>
-                <el-tooltip :content="peer.listening ? '正在聆听对话' : '仅聆听用户和自身对话'" placement="top">
+                <el-tooltip v-if="!peer.isObserver" :content="peer.listening ? '正在聆听其他AI对话' : '仅聆听用户和自身对话'" placement="top">
+                  <el-button
+                    :icon="peer.listening ? View : Hide"
+                    @click="togglePeerListening(peer.id)"
+                    size="small"
+                    :type="peer.listening ? 'primary' : 'info'"
+                    circle
+                    plain
+                    style="margin-left: -5px; margin-right: 5px;"
+                  />
+                </el-tooltip>
+                 <el-tooltip v-if="peer.isObserver" :content="peer.listening ? '正在分析其他AI对话' : '仅分析用户对话'" placement="top">
                   <el-button
                     :icon="peer.listening ? View : Hide"
                     @click="togglePeerListening(peer.id)"
@@ -205,7 +225,7 @@
                 class="role-input"
               >
                 <el-option label="用户" value="用户" />
-                <el-option v-for="peer in enabledPeersForChat" :key="peer.name" :label="peer.name" :value="peer.name" />
+                <el-option v-for="peer in enabledPeersForRoleDropdown" :key="peer.name" :label="peer.name + (peer.isObserver ? ' (旁观者)' : '')" :value="peer.name" />
               </el-select>
               <el-input
                 v-model="userMessageContent"
@@ -270,6 +290,12 @@
       <el-form-item label="名称 (聊天显示)" prop="name" :rules="{ required: true, message: '名称不能为空', trigger: 'blur' }">
         <el-input v-model="peerForm.name" />
       </el-form-item>
+       <el-form-item label="设为旁观者">
+        <el-switch v-model="peerForm.isObserver" />
+         <el-tooltip content="旁观者角色会生成内容，但其发言不会被其他AI角色学习。旁观者在形成自己观点时，也不会参考自己之前的发言。" placement="top-start">
+            <el-icon style="margin-left: 8px; color: #909399;"><InfoFilled /></el-icon>
+         </el-tooltip>
+      </el-form-item>
       <el-form-item label="服务商" prop="provider" :rules="{ required: true, message: '服务商不能为空', trigger: 'change' }">
         <el-select v-model="peerForm.provider" placeholder="选择服务商" style="width: 100%" @change="updatePeerFormModels">
           <el-option v-for="p in providers" :key="p.name" :label="p.name" :value="p.name" />
@@ -291,6 +317,9 @@
       </el-form-item>
        <el-form-item label="默认聆听对话">
         <el-switch v-model="peerForm.listening" />
+         <el-tooltip content="开启后，此角色会参考其他AI的发言。旁观者开启此项，会分析其他AI发言；关闭则仅分析用户发言。" placement="top-start">
+            <el-icon style="margin-left: 8px; color: #909399;"><InfoFilled /></el-icon>
+         </el-tooltip>
       </el-form-item>
     </el-form>
     <template #footer>
@@ -302,15 +331,16 @@
 
 <script setup>
 import { ref, reactive, computed, nextTick, onMounted, watch } from 'vue'
-import { Setting, Document, User, ChatDotRound, Promotion, Plus, View, Hide } from '@element-plus/icons-vue'
+import { Setting, Document, User, ChatDotRound, Promotion, Plus, View, Hide, InfoFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import axios from 'axios'
 import { marked } from 'marked';
 
+// LS_KEYS.PEERS remains v7 or increment if other breaking changes are made
 const LS_KEYS = {
   PROVIDERS: 'multiAI_providers_v6_zh',
   SYSTEM_PROMPTS: 'multiAI_systemPrompts_v6_zh',
-  PEERS: 'multiAI_peers_v6_zh',
+  PEERS: 'multiAI_peers_v6_zh', 
   SPEAKING_ORDER: 'multiAI_speakingOrder_v6_zh',
   ACTIVE_TAB: 'multiAI_activeTab_v6_zh',
   CHAT_MESSAGES: 'multiAI_chatMessages_v6_zh'
@@ -319,14 +349,14 @@ const LS_KEYS = {
 const activeTab = ref(localStorage.getItem(LS_KEYS.ACTIVE_TAB) || 'provider')
 const providers = ref([])
 const publicSystemList = ref([])
-const peers = ref([])
+const peers = ref([]) // Will be populated by loadFromLocalStorage with defaultPeer structure
 const speakingOrder = ref([])
 const chatMessages = ref([])
 const isGenerating = ref(false)
 const peerCurrentlyGenerating = ref('');
 const liveStreamDisplayContent = ref(null);
 const userMessageContent = ref('')
-const userMessageRole = ref('用户')
+const userMessageRole = ref('用户') // Default role for user input
 const chatMessagesContainer_ref = ref(null)
 const isFetchingDialogModels = ref(false)
 
@@ -338,14 +368,16 @@ const defaultPeer = () => ({
   systemPrompt: '',
   stream: true,
   enable: true,
-  listening: true,
+  listening: true, // Default for all peers, including observers
   listeningStartIndex: null,
+  isObserver: false,
 });
 
 
 const loadFromLocalStorage = () => {
   providers.value = JSON.parse(localStorage.getItem(LS_KEYS.PROVIDERS) || '[]')
   publicSystemList.value = JSON.parse(localStorage.getItem(LS_KEYS.SYSTEM_PROMPTS) || '[]')
+  // Ensure all loaded peers get the default structure, especially new fields like isObserver
   peers.value = JSON.parse(localStorage.getItem(LS_KEYS.PEERS) || '[]').map(p => ({ ...defaultPeer(), ...p, listeningStartIndex: null }));
   speakingOrder.value = JSON.parse(localStorage.getItem(LS_KEYS.SPEAKING_ORDER) || '[]')
   chatMessages.value = JSON.parse(localStorage.getItem(LS_KEYS.CHAT_MESSAGES) || '[]').map(m => ({...m, id: m.id || Date.now() + Math.random() }))
@@ -354,7 +386,7 @@ const loadFromLocalStorage = () => {
 const saveToLocalStorage = (key, data) => {
   if (key === LS_KEYS.PEERS) {
     const peersToSave = data.map(p => {
-      const { listeningStartIndex, ...peerToSave } = p;
+      const { listeningStartIndex, ...peerToSave } = p; // Exclude runtime state
       return peerToSave;
     });
     localStorage.setItem(key, JSON.stringify(peersToSave));
@@ -380,12 +412,15 @@ const formModelValue = ref('')
 const formModelInput_ref = ref(null)
 
 const peerDialogVisible = ref(false)
-const editingPeer = ref(null)
+const editingPeer = ref(null) // Stores the original peer object being edited
 const peerFormRef = ref(null)
-const peerForm = reactive(defaultPeer())
+const peerForm = reactive(defaultPeer()) // Form data, reactive
 const availablePeerModels = ref([])
 
-const enabledPeersForChat = computed(() => peers.value.filter(p => p.enable));
+
+// Computed properties for UI elements
+const enabledPeersForRoleDropdown = computed(() => peers.value.filter(p => p.enable));
+const enabledPeersForChatActions = computed(() => peers.value.filter(p => p.enable));
 const enabledPeersForSpeakingOrder = computed(() => peers.value.filter(p => p.enable));
 
 
@@ -406,7 +441,7 @@ const showAddProviderDialog = () => {
 };
 
 const showEditProviderDialog = (provider) => {
-  editingProvider.value = JSON.parse(JSON.stringify(provider));
+  editingProvider.value = JSON.parse(JSON.stringify(provider)); // Store a copy for comparison if name changes
   Object.assign(providerForm, JSON.parse(JSON.stringify(provider)));
   providerDialogVisible.value = true;
   nextTick(() => providerFormRef.value?.clearValidate());
@@ -420,6 +455,7 @@ const saveProvider = async () => {
       if (editingProvider.value) {
         const index = providers.value.findIndex(p => p.name === editingProvider.value.name);
         if (index !== -1) {
+          // Check for name collision only if name actually changed
           if (providerData.name !== editingProvider.value.name && providers.value.some((p, i) => i !== index && p.name === providerData.name)) {
             ElMessage.error(`服务商名称 '${providerData.name}' 已存在.`);
             return;
@@ -447,9 +483,10 @@ const removeProvider = (index) => {
       const providerName = providers.value[index].name;
       providers.value.splice(index, 1);
       
-      const peersToRemove = peers.value.filter(peer => peer.provider === providerName).map(p => p.name);
+      const peersToRemoveNames = peers.value.filter(peer => peer.provider === providerName).map(p => p.name);
       peers.value = peers.value.filter(peer => peer.provider !== providerName);
-      speakingOrder.value = speakingOrder.value.filter(peerName => !peersToRemove.includes(peerName));
+      // Remove affected peers from speaking order
+      speakingOrder.value = speakingOrder.value.filter(nameInOrder => !peersToRemoveNames.includes(nameInOrder));
       
       ElMessage.success('服务商及关联AI角色已删除.');
     }).catch(() => {});
@@ -468,13 +505,15 @@ const fetchModelsForDialog = async () => {
         const response = await axios.get(`${url}models`, { headers });
         if (response.data && response.data.data) {
             const apiModels = response.data.data.map(model => model.id);
+            // Merge and de-duplicate
             providerForm.models = [...new Set([...(providerForm.models || []), ...apiModels])];
             ElMessage.success(`模型已获取并合并到 ${providerForm.name || '当前服务商'}.`);
         } else {
             ElMessage.warning('无法从API响应中解析模型.');
         }
     } catch (error) {
-        ElMessage.error(`获取模型失败: ${error.message || '未知错误'}`);
+        console.error("Error fetching models for dialog:", error);
+        ElMessage.error(`获取模型失败: ${error.response?.data?.error?.message || error.message || '未知错误'}`);
     } finally {
         isFetchingDialogModels.value = false;
     }
@@ -486,10 +525,10 @@ const refreshProviderModels = async (provider) => {
     ElMessage.warning('服务商URL或API密钥缺失.');
     return;
   }
-  const originalGeneratingState = isGenerating.value;
-  isGenerating.value = true;
-  peerCurrentlyGenerating.value = `正在刷新 ${provider.name}`;
-  liveStreamDisplayContent.value = "";
+  const originalGeneratingState = isGenerating.value; // Preserve chat generating state
+  isGenerating.value = true; // Use general loading state
+  peerCurrentlyGenerating.value = `正在刷新 ${provider.name}`; // Visual feedback
+  liveStreamDisplayContent.value = ""; // Placeholder for loading
   try {
     const headers = { 'Authorization': `Bearer ${provider.key}` };
     let url = provider.url;
@@ -497,15 +536,20 @@ const refreshProviderModels = async (provider) => {
     const response = await axios.get(`${url}models`, { headers });
     if (response.data && response.data.data) {
       const apiModels = response.data.data.map(model => model.id);
-      provider.models = [...new Set([...(provider.models || []), ...apiModels])];
+      // Find the provider in the main list and update its models
+      const providerInList = providers.value.find(p => p.name === provider.name);
+      if (providerInList) {
+        providerInList.models = [...new Set([...(providerInList.models || []), ...apiModels])];
+      }
       ElMessage.success(`服务商 '${provider.name}' 的模型已刷新.`);
     } else {
       ElMessage.warning('无法从API响应中解析模型.');
     }
   } catch (error) {
-    ElMessage.error(`刷新模型失败: ${error.message || '未知错误'}`);
+    console.error("Error refreshing provider models:", error);
+    ElMessage.error(`刷新模型失败: ${error.response?.data?.error?.message || error.message || '未知错误'}`);
   } finally {
-    isGenerating.value = originalGeneratingState;
+    isGenerating.value = originalGeneratingState; // Restore chat generating state
     peerCurrentlyGenerating.value = '';
     liveStreamDisplayContent.value = null;
   }
@@ -521,7 +565,7 @@ const addFormModel = () => {
     providerForm.models.push(formModelValue.value);
   }
   formModelValue.value = '';
-  formModelInputVisible.value = false;
+  formModelInputVisible.value = false; // Hide after adding or if empty
 };
 
 const removeFormModel = (index) => {
@@ -537,20 +581,22 @@ const showAddPeerDialog = () => {
     return;
   }
   editingPeer.value = null;
-  Object.assign(peerForm, defaultPeer());
+  Object.assign(peerForm, defaultPeer()); // Reset form to defaults
   availablePeerModels.value = [];
   if (providers.value.length > 0 && !peerForm.provider) {
+      // Pre-select first provider if none is set
       peerForm.provider = providers.value[0].name;
   }
-  updatePeerFormModels();
+  updatePeerFormModels(); // Populate models based on pre-selected or existing provider
   peerDialogVisible.value = true;
   nextTick(() => peerFormRef.value?.clearValidate());
 };
 
 const showEditPeerDialog = (peer) => {
-  editingPeer.value = peer; 
-  const { listeningStartIndex, ...formValues } = peer; 
-  Object.assign(peerForm, formValues);
+  editingPeer.value = peer; // Keep reference to original peer for ID comparison
+  // Deep copy peer data to form, ensuring all default fields are present
+  const { listeningStartIndex, ...formValues } = JSON.parse(JSON.stringify(peer)); 
+  Object.assign(peerForm, defaultPeer(), formValues);
   updatePeerFormModels();
   peerDialogVisible.value = true;
   nextTick(() => peerFormRef.value?.clearValidate());
@@ -560,6 +606,7 @@ const showEditPeerDialog = (peer) => {
 const updatePeerFormModels = () => {
   const selectedProvider = providers.value.find(p => p.name === peerForm.provider);
   availablePeerModels.value = selectedProvider ? (selectedProvider.models || []) : [];
+  // If current model not in new list, or no model selected, pick first available, or clear
   if (availablePeerModels.value.length > 0 && !availablePeerModels.value.includes(peerForm.model)) {
     peerForm.model = availablePeerModels.value[0];
   } else if (availablePeerModels.value.length === 0) {
@@ -567,30 +614,35 @@ const updatePeerFormModels = () => {
   }
 };
 
+// No longer need to watch peerForm.isObserver to clear fields, as observers now have full config.
+// Validation rules in the dialog will handle required fields.
+
 const savePeer = async () => {
   if (!peerFormRef.value) return;
   await peerFormRef.value.validate(async (valid) => {
     if (valid) {
+      // Create a clean peer data object from the form, excluding runtime state
       const { listeningStartIndex, ...peerDataFromForm } = JSON.parse(JSON.stringify(peerForm));
       const peerData = { ...defaultPeer(), ...peerDataFromForm, listeningStartIndex: null }; 
-
 
       if (editingPeer.value) { 
         const index = peers.value.findIndex(p => p.id === editingPeer.value.id);
         if (index !== -1) {
+          // Check for name collision only if name actually changed
           if (peerData.name !== peers.value[index].name && peers.value.some((p, i) => i !== index && p.name === peerData.name)) {
             ElMessage.error(`AI角色名称 '${peerData.name}' 已存在.`);
             return;
           }
-          const updatedPeer = { ...peers.value[index], ...peerData }; 
-          peers.value.splice(index, 1, updatedPeer);
+          const oldPeerName = peers.value[index].name;
+          peers.value.splice(index, 1, { ...peers.value[index], ...peerData }); // Merge updates
 
-          if (editingPeer.value.name !== peerData.name) {
-             speakingOrder.value = speakingOrder.value.map(nameInOrder => nameInOrder === editingPeer.value.name ? peerData.name : nameInOrder);
+          // Update speaking order if name changed
+          if (oldPeerName !== peerData.name) {
+             speakingOrder.value = speakingOrder.value.map(nameInOrder => nameInOrder === oldPeerName ? peerData.name : nameInOrder);
           }
           ElMessage.success(`AI角色 '${peerData.name}' (ID: ${peerData.id}) 已更新.`);
         }
-      } else {
+      } else { // Adding new peer
         if (peers.value.some(p => p.id === peerData.id)) {
           ElMessage.error(`AI角色ID '${peerData.id}' 已存在.`);
           return;
@@ -602,6 +654,12 @@ const savePeer = async () => {
         peers.value.push(peerData);
         ElMessage.success(`AI角色 '${peerData.name}' (ID: ${peerData.id}) 已添加.`);
       }
+      // Clean up speakingOrder if a peer was disabled
+      speakingOrder.value = speakingOrder.value.filter(name => {
+        const p = peers.value.find(pr => pr.name === name);
+        return p && p.enable; // Observers can be in speaking order
+      });
+
       peerDialogVisible.value = false;
       editingPeer.value = null;
     }
@@ -618,6 +676,7 @@ const removePeer = (peerId) => {
       if (index > -1) {
         const removedPeerName = peers.value[index].name;
         peers.value.splice(index, 1);
+        // Remove from speaking order
         speakingOrder.value = speakingOrder.value.filter(name => name !== removedPeerName);
         ElMessage.success('AI 角色已删除.');
       }
@@ -630,12 +689,15 @@ const togglePeerListening = (peerId) => {
     const oldListeningState = peer.listening;
     peer.listening = !peer.listening;
 
-    if (!oldListeningState && peer.listening) { 
-        peer.listeningStartIndex = chatMessages.value.length;
-    } else if (oldListeningState && !peer.listening) { 
-        peer.listeningStartIndex = null; 
+    if (!oldListeningState && peer.listening) { // Just started listening
+        peer.listeningStartIndex = chatMessages.value.length; // Start listening from current point
+    } else if (oldListeningState && !peer.listening) { // Stopped listening
+        peer.listeningStartIndex = null; // Reset
     }
-    ElMessage.info(`${peer.name} ${peer.listening ? `开始聆听对话 (从当前位置)` : '仅聆听用户和自身对话'}`);
+    const listeningTarget = peer.isObserver ? "其他AI的对话进行分析" : "其他AI的对话";
+    const notListeningTarget = peer.isObserver ? "用户对话进行分析" : "用户和自身对话";
+
+    ElMessage.info(`${peer.name} ${peer.listening ? `开始聆听${listeningTarget} (从当前位置)` : `仅聆听${notListeningTarget}`}`);
   }
 };
 
@@ -666,8 +728,16 @@ const formatMessageContent = (content) => {
   return marked.parse(String(content || ''));
 };
 
+// Helper to check if a role name corresponds to any configured peer
+const isConfiguredPeerMessage = (role) => peers.value.some(p => p.name === role);
+// Helper to check if a role name corresponds to an Observer peer
+const isObserverMessage = (role) => peers.value.some(p => p.name === role && p.isObserver);
 
-const isAIMessage = (role) => peers.value.some(p => p.name === role);
+const getGeneratingPeerIsObserver = () => {
+    if (!peerCurrentlyGenerating.value) return false;
+    const peer = peers.value.find(p => p.name === peerCurrentlyGenerating.value);
+    return peer ? peer.isObserver : false;
+};
 
 const replaceSystemPromptPlaceholders = (promptText) => {
   if (!promptText) return "";
@@ -681,15 +751,15 @@ const replaceSystemPromptPlaceholders = (promptText) => {
 const letPeerSpeak = async (peerName) => {
   if (isGenerating.value) return;
 
-  const peer = peers.value.find(p => p.name === peerName);
-  if (!peer || !peer.enable) {
+  const currentPeer = peers.value.find(p => p.name === peerName); // The peer that is about to speak
+  if (!currentPeer || !currentPeer.enable) {
     ElMessage.error(`AI角色 '${peerName}' 未找到或未启用.`);
     return;
   }
-  const provider = providers.value.find(p => p.name === peer?.provider);
-
+  
+  const provider = providers.value.find(p => p.name === currentPeer?.provider);
   if (!provider || !provider.url || !provider.key) {
-    ElMessage.error('AI角色或服务商未正确配置 (缺少URL/密钥).');
+    ElMessage.error(`AI角色 '${peerName}' 或其服务商未正确配置 (缺少URL/密钥).`);
     return;
   }
 
@@ -701,31 +771,54 @@ const letPeerSpeak = async (peerName) => {
   let accumulatedContentForFinalPush = "";
 
   try {
-    const finalSystemPrompt = replaceSystemPromptPlaceholders(peer.systemPrompt);
+    const finalSystemPrompt = replaceSystemPromptPlaceholders(currentPeer.systemPrompt);
     const messagesForAPI = [{ role: 'system', content: finalSystemPrompt }];
 
-    let currentMultiTurnUserContent = [];
-    for (let i = 0; i < chatMessages.value.length; i++) {
-        const msg = chatMessages.value[i];
-        const msgIndex = i;
-        const isOwnMessageForPeer = msg.role === peer.name;
-        const isMessageFromUserRole = !isAIMessage(msg.role);
+    let currentMultiTurnUserContent = []; 
 
-        if (isOwnMessageForPeer) {
+    for (let i = 0; i < chatMessages.value.length; i++) {
+        const msg = chatMessages.value[i]; // Historical message
+        const msgIndex = i;
+        const msgSenderPeer = peers.value.find(p => p.name === msg.role); // Peer who sent the historical message
+
+        // --- Context Filtering Logic ---
+        if (currentPeer.isObserver) {
+            // Observer context:
+            // 1. Exclude its own previous messages.
+            // 2. Exclude messages from other observers (optional, but good for clarity).
+            if (msgSenderPeer && msgSenderPeer.id === currentPeer.id) continue; 
+            // if (msgSenderPeer && msgSenderPeer.isObserver && msgSenderPeer.id !== currentPeer.id) continue; // Uncomment to make observers ignore other observers
+        } else {
+            // Non-Observer (regular AI) context:
+            // 1. Exclude messages from ANY observer.
+            if (msgSenderPeer && msgSenderPeer.isObserver) continue;
+        }
+        // --- End Context Filtering Logic ---
+
+
+        // Now, determine if the currentPeer (speaker) should "hear" this historical msg
+        const isOwnMessageForPeer = msg.role === currentPeer.name; // This historical msg was from the current speaker
+        const isMessageFromUserRole = msg.role === '用户'; // This historical msg was from the User
+
+        if (isOwnMessageForPeer) { // An AI's own past utterances (non-observers only, observers filter this above)
             if (currentMultiTurnUserContent.length > 0) {
                 messagesForAPI.push({ role: 'user', content: JSON.stringify(currentMultiTurnUserContent) });
                 currentMultiTurnUserContent = [];
             }
             messagesForAPI.push({ role: 'assistant', content: msg.content });
-        } else {
+        } else { // Message from User or another AI (that's not an observer, or not self for observer)
             let canHearThisMessage = false;
             if (isMessageFromUserRole) {
                 canHearThisMessage = true; 
-            } else if (peer.listening) { 
-                if (peer.listeningStartIndex === null || msgIndex >= peer.listeningStartIndex) {
-                    canHearThisMessage = true;
+            } else if (msgSenderPeer && !msgSenderPeer.isObserver) { // Message from another non-observer AI
+                if (currentPeer.listening) { // If current speaker is listening to other AIs
+                    if (currentPeer.listeningStartIndex === null || msgIndex >= currentPeer.listeningStartIndex) {
+                        canHearThisMessage = true;
+                    }
                 }
             }
+            // Note: If msgSenderPeer is undefined (e.g. role="SystemError"), it won't be added to multi-turn.
+
             if (canHearThisMessage) {
                 currentMultiTurnUserContent.push({ [msg.role]: msg.content });
             }
@@ -734,29 +827,54 @@ const letPeerSpeak = async (peerName) => {
     if (currentMultiTurnUserContent.length > 0) {
         messagesForAPI.push({ role: 'user', content: JSON.stringify(currentMultiTurnUserContent) });
     }
+    
 
     const headers = { 'Authorization': `Bearer ${provider.key}`, 'Content-Type': 'application/json' };
     let url = provider.url;
     if (!url.endsWith('/')) url += '/';
 
-    const payload = { model: peer.model, messages: messagesForAPI, stream: peer.stream };
+    const payload = { model: currentPeer.model, messages: messagesForAPI, stream: currentPeer.stream };
 
-    if (peer.stream) {
+    if (currentPeer.stream) {
       const response = await fetch(`${url}chat/completions`, { method: 'POST', headers, body: JSON.stringify(payload) });
       if (!response.ok || !response.body) {
         const errorBody = response.ok ? "响应体为空" : await response.text();
-        throw new Error(`API 错误: ${response.status} - ${errorBody}`);
+        throw new Error(`API 错误 (${response.status}): ${errorBody}`);
       }
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
+      let buffer = '';
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n').filter(line => line.trim() !== '');
+        if (done) {
+            // Process any remaining buffer content if it doesn't end with a newline
+            if (buffer.trim()) {
+                 const lines = buffer.split('\n').filter(line => line.trim() !== '');
+                 for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        const jsonStr = line.substring(5).trim();
+                        if (jsonStr !== '[DONE]') {
+                            try {
+                                const data = JSON.parse(jsonStr);
+                                const deltaContent = data.choices?.[0]?.delta?.content;
+                                if (deltaContent) {
+                                    accumulatedContentForFinalPush += deltaContent;
+                                    liveStreamDisplayContent.value += deltaContent;
+                                    scrollToBottom();
+                                }
+                            } catch (e) { console.warn("Stream parsing error (final):", e, jsonStr); }
+                        }
+                    }
+                 }
+            }
+            break;
+        }
+        
+        buffer += decoder.decode(value, { stream: true });
+        let lines = buffer.split('\n');
+        buffer = lines.pop(); // Keep the last (potentially incomplete) line in buffer
 
         let shouldBreakOuterLoop = false;
         for (const line of lines) {
@@ -774,31 +892,34 @@ const letPeerSpeak = async (peerName) => {
                 liveStreamDisplayContent.value += deltaContent;
                 scrollToBottom();
               }
-              if (data.choices?.[0]?.finish_reason) {
+              if (data.choices?.[0]?.finish_reason) { // Some APIs send finish_reason before [DONE]
                  shouldBreakOuterLoop = true;
-                 break;
+                 // break; // Don't break inner, process remaining lines in this chunk if any
               }
-            } catch (e) { /* ignore */ }
+            } catch (e) { console.warn("Stream parsing error:", e, jsonStr); }
           }
         }
         if (shouldBreakOuterLoop) break;
       }
-    } else {
+    } else { // Non-stream
       const response = await axios.post(`${url}chat/completions`, payload, { headers });
       accumulatedContentForFinalPush = response.data?.choices?.[0]?.message?.content;
-      if (!accumulatedContentForFinalPush && response.data?.error) {
-          throw new Error(`API 错误 (非流式): ${response.data.error.message || '未知API错误'}`);
+      if ((accumulatedContentForFinalPush === null || accumulatedContentForFinalPush === undefined) && response.data?.error) {
+          throw new Error(`API 错误 (非流式): ${response.data.error.message || JSON.stringify(response.data.error)}`);
       }
     }
 
     if (accumulatedContentForFinalPush || accumulatedContentForFinalPush === "") {
         chatMessages.value.push({ role: peerName, content: accumulatedContentForFinalPush, id: Date.now() + Math.random() });
-    } else if (!peer.stream && (accumulatedContentForFinalPush === null || accumulatedContentForFinalPush === undefined)) {
+    } else if (!currentPeer.stream && (accumulatedContentForFinalPush === null || accumulatedContentForFinalPush === undefined)) {
         ElMessage.warning(`未从 ${peerName} 收到内容.`);
     }
 
   } catch (error) {
+    console.error(`AI Error (${peerName}):`, error);
     ElMessage.error(`AI 错误 (${peerName}): ${error.message || '未知错误'}`);
+    // Optionally add error to chat for visibility
+    // chatMessages.value.push({ role: "SystemError", content: `Error with ${peerName}: ${error.message}`, id: Date.now() + Math.random()});
   } finally {
     isGenerating.value = false;
     peerCurrentlyGenerating.value = '';
@@ -829,11 +950,11 @@ const deleteLastMessage = () => {
 const autoRound = async () => {
   if (isGenerating.value || speakingOrder.value.length === 0) return;
   for (const peerName of speakingOrder.value) {
-    if (isGenerating.value) {
+    if (isGenerating.value) { 
         ElMessage.info("自动轮流已中断.");
         break;
     }
-    const peerToSpeak = peers.value.find(p => p.name === peerName && p.enable);
+    const peerToSpeak = peers.value.find(p => p.name === peerName && p.enable); // Observers can be in speaking order
     if (peerToSpeak) {
         await letPeerSpeak(peerToSpeak.name);
     } else {
@@ -846,11 +967,12 @@ const clearChat = () => {
   ElMessageBox.confirm('确定清空所有聊天记录吗?', '确认清空', { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' })
     .then(() => {
       chatMessages.value = [];
+      // Reset listeningStartIndex for all peers if they are set to listen from current point
       peers.value.forEach(p => {
-          if (p.listening && p.listeningStartIndex !== null) {
-              p.listeningStartIndex = 0; 
+          if (p.listening && p.listeningStartIndex !== null) { // If it was listening from a specific point
+              p.listeningStartIndex = 0; // Reset to listen from the beginning of new chat
           } else if (!p.listening) {
-              p.listeningStartIndex = null;
+              p.listeningStartIndex = null; // Ensure it's null if not listening
           }
       });
       ElMessage.success('聊天记录已清空.');
@@ -863,9 +985,13 @@ onMounted(() => {
      providers.value.push({ name: '示例 OpenAI', url: 'https://api.openai.com/v1', key: '', models: ['gpt-3.5-turbo', 'gpt-4'] });
   }
   if (publicSystemList.value.length === 0) {
-    publicSystemList.value.push('你是一个有用的AI.');
+    publicSystemList.value.push('你是一个有用的AI助理。');
   }
-  speakingOrder.value = speakingOrder.value.filter(name => peers.value.some(p => p.name === name && p.enable));
+  // Ensure speaking order only contains currently enabled peers
+  speakingOrder.value = speakingOrder.value.filter(name => {
+    const p = peers.value.find(pr => pr.name === name);
+    return p && p.enable;
+  });
   scrollToBottom();
 });
 
@@ -897,7 +1023,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helve
   margin-bottom: 15px;
   max-width: 85%;
 }
-.ai-message-wrapper {
+.ai-message-wrapper, .observer-message-wrapper { /* Observer messages align like AI messages by default */
   align-items: flex-start;
   margin-right: auto;
 }
@@ -905,24 +1031,23 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helve
   align-items: flex-end;
   margin-left: auto;
 }
+
 .message-meta {
   width: 100%;
   margin-bottom: 4px;
 }
-.ai-message-wrapper .message-meta {
+.ai-message-wrapper .message-meta, .observer-message-wrapper .message-meta {
   text-align: left;
 }
 .user-message-wrapper .message-meta {
   text-align: right;
 }
+
 .message-role-display {
   font-size: 0.8em;
   font-weight: 600;
   color: #555;
   padding: 0 5px;
-}
-.user-message-wrapper .message-role-display {
-  color: #666; /* Slightly different for user if desired */
 }
 
 .message-bubble {
@@ -931,107 +1056,39 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helve
   line-height: 1.5;
   word-break: break-word;
   box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-  max-width: 100%; /* Bubble takes width of its content up to wrapper max-width */
+  max-width: 100%; 
 }
 .user-message-wrapper .message-bubble {
-  background-color: #DCF8C6; /* WeChat-like green */
+  background-color: #DCF8C6; 
   color: #333;
 }
-.ai-message-wrapper .message-bubble {
-  background-color: #FFFFFF; /* WeChat-like white for others */
+.ai-message-wrapper .message-bubble { /* Regular AI */
+  background-color: #FFFFFF; 
   color: #333;
   border: 1px solid #eee;
 }
-.ai-message-wrapper.typing-indicator .message-bubble {
-  font-style: italic;
-  background-color: #f5f5f5;
+.observer-message-wrapper .message-bubble, .observer-bubble { /* Observer AI */
+  background-color: #e6f7ff; /* A light blue for observers */
+  color: #303133;
+  border: 1px solid #d9ecff;
 }
 
-/* .message-content {
-} */
-.message-content > *:first-child {
-  margin-top: 0;
-}
-.message-content > *:last-child {
-  margin-bottom: 0;
-}
-.message-content p {
-  margin-top: 0;
-  margin-bottom: 0.75em;
-}
-.message-content ul, .message-content ol {
-  padding-left: 20px;
-  margin-top: 0.5em;
-  margin-bottom: 0.5em;
-}
-.message-content li {
-  margin-bottom: 0.25em;
-}
-.message-content pre {
-  background-color: #f0f0f0;
-  padding: 10px;
-  border-radius: 4px;
-  overflow-x: auto;
-  margin: 0.75em 0;
-  font-size: 0.9em;
-  line-height: 1.4;
-}
-.message-content code { /* Inline code */
-  background-color: #f0f0f0;
-  padding: 2px 5px;
-  border-radius: 3px;
-  font-size: 0.9em;
-}
-.message-content pre code { /* Code inside pre block */
-  background-color: transparent;
-  padding: 0;
-  border-radius: 0;
-  font-size: inherit; /* Inherit from pre */
-}
-.message-content blockquote {
-  border-left: 3px solid #ccc;
-  padding-left: 10px;
-  margin-left: 0;
-  margin-right: 0;
-  margin-top: 0.75em;
-  margin-bottom: 0.75em;
-  color: #666;
-  font-style: italic;
-}
-.message-content table {
-  border-collapse: collapse;
-  margin: 1em 0;
-  width: auto;
-  font-size: 0.9em;
-}
-.message-content th, .message-content td {
-  border: 1px solid #ddd;
-  padding: 8px;
-  text-align: left;
-}
-.message-content th {
-  background-color: #f9f9f9;
-  font-weight: bold;
-}
-.message-content img {
-  max-width: 100%;
-  height: auto;
-  border-radius: 4px;
-  margin: 0.5em 0;
-}
-.message-content a {
-  color: #007bff;
-  text-decoration: none;
-}
-.message-content a:hover {
-  text-decoration: underline;
-}
-.message-content hr.turn-separator {
-  border: 0;
-  height: 1px;
-  background-color: #ddd;
-  margin: 10px 0;
-}
+.message-content > *:first-child { margin-top: 0; }
+.message-content > *:last-child { margin-bottom: 0; }
+.message-content p { margin-top: 0; margin-bottom: 0.75em; }
+.message-content ul, .message-content ol { padding-left: 20px; margin-top: 0.5em; margin-bottom: 0.5em; }
+.message-content li { margin-bottom: 0.25em; }
+.message-content pre { background-color: #f0f0f0; padding: 10px; border-radius: 4px; overflow-x: auto; margin: 0.75em 0; font-size: 0.9em; line-height: 1.4; }
+.message-content code { background-color: #f0f0f0; padding: 2px 5px; border-radius: 3px; font-size: 0.9em; }
+.message-content pre code { background-color: transparent; padding: 0; border-radius: 0; font-size: inherit; }
+.message-content blockquote { border-left: 3px solid #ccc; padding-left: 10px; margin-left: 0; margin-right: 0; margin-top: 0.75em; margin-bottom: 0.75em; color: #666; font-style: italic; }
+.message-content table { border-collapse: collapse; margin: 1em 0; width: auto; font-size: 0.9em; }
+.message-content th, .message-content td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+.message-content th { background-color: #f9f9f9; font-weight: bold; }
+.message-content img { max-width: 100%; height: auto; border-radius: 4px; margin: 0.5em 0; }
+.message-content a { color: #007bff; text-decoration: none; }
+.message-content a:hover { text-decoration: underline; }
+.message-content hr.turn-separator { border: 0; height: 1px; background-color: #ddd; margin: 10px 0; }
 
 
 .chat-input-area { padding: 15px 20px; border-top: 1px solid #e0e0e0; background-color: #ffffff; }
