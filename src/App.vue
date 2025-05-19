@@ -1,11 +1,15 @@
 <template>
   <el-container class="app-container">
-    <el-aside width="280px" class="sidebar">
+    <el-aside :width="isSidebarCollapsed ? '64px' : '280px'" class="sidebar" :class="{ 'is-collapsed': isSidebarCollapsed }">
       <div class="logo">
-        <img src="/favicon.jpg" alt="MultiAI Logo" style="width: 50px; height: 40px; vertical-align: middle; margin-right: 8px;">
-        MultiAI
+        <img src="/favicon.jpg" alt="MultiAI Logo" style="width: 40px; height: 40px; vertical-align: middle;" :style="{ 'margin-right': isSidebarCollapsed ? '0px' : '8px' }">
+        <span v-if="!isSidebarCollapsed">MultiAI</span>
       </div>
-      <el-menu :default-active="activeTab" class="menu" @select="handleMenuSelect">
+      <div class="toggle-sidebar-button" @click="toggleSidebar">
+        <el-icon v-if="isSidebarCollapsed"><ArrowRightBold /></el-icon>
+        <el-icon v-else><ArrowLeftBold /></el-icon>
+      </div>
+      <el-menu :default-active="activeTab" class="menu" @select="handleMenuSelect" :collapse="isSidebarCollapsed">
         <el-menu-item index="provider">
           <el-icon><Setting /></el-icon>
           <span>服务商配置</span>
@@ -129,7 +133,7 @@
                   <el-switch v-model="scope.row.enable" />
                 </template>
               </el-table-column>
-              <el-table-column label="聆听(默认)" width="100" align="center">
+               <el-table-column label="聆听" width="70" align="center">
                 <template #default="scope">
                    <el-tag :type="scope.row.listening ? 'primary' : 'info'">{{ scope.row.listening ? '开启' : '关闭' }}</el-tag>
                 </template>
@@ -150,21 +154,22 @@
           </el-card>
         </div>
 
-        <div v-if="activeTab === 'chat'" class="chat-interface">
+         <div v-if="activeTab === 'chat'" class="chat-interface">
           <div class="chat-messages-container" ref="chatMessagesContainer_ref">
             <div v-for="(message, index) in chatMessages" :key="message.id || index"
                  class="message-wrapper"
                  :class="{ 'user-message-wrapper': message.role === '用户',
                            'ai-message-wrapper': isConfiguredPeerMessage(message.role) && !isObserverMessage(message.role),
-                           'observer-message-wrapper': isObserverMessage(message.role) }">
+                           'observer-message-wrapper': isObserverMessage(message.role),
+                           'custom-role-message-wrapper': !isConfiguredPeerMessage(message.role) && message.role !== '用户' }">
               <div class="message-meta">
                   <span class="message-role-display">{{ message.role }}{{ isObserverMessage(message.role) ? ' (旁观)' : '' }}</span>
               </div>
-              <div class="message-bubble" :class="{'observer-bubble': isObserverMessage(message.role) }">
+              <div class="message-bubble" :class="{'observer-bubble': isObserverMessage(message.role), 'custom-role-bubble': !isConfiguredPeerMessage(message.role) && message.role !== '用户' }">
                 <div class="message-content" v-html="formatMessageContent(message.content)"></div>
               </div>
             </div>
-            <div v-if="isGenerating && liveStreamDisplayContent !== null" 
+            <div v-if="isGenerating && liveStreamDisplayContent !== null"
                  class="message-wrapper"
                  :class="getGeneratingPeerIsObserver() ? 'observer-message-wrapper' : 'ai-message-wrapper'">
                 <div class="message-meta">
@@ -331,34 +336,35 @@
 
 <script setup>
 import { ref, reactive, computed, nextTick, onMounted, watch } from 'vue'
-import { Setting, Document, User, ChatDotRound, Promotion, Plus, View, Hide, InfoFilled } from '@element-plus/icons-vue'
+import { Setting, Document, User, ChatDotRound, Promotion, Plus, View, Hide, InfoFilled, ArrowLeftBold, ArrowRightBold } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import axios from 'axios'
 import { marked } from 'marked';
 
-// LS_KEYS.PEERS remains v7 or increment if other breaking changes are made
 const LS_KEYS = {
   PROVIDERS: 'multiAI_providers_v6_zh',
   SYSTEM_PROMPTS: 'multiAI_systemPrompts_v6_zh',
-  PEERS: 'multiAI_peers_v6_zh', 
+  PEERS: 'multiAI_peers_v6_zh',
   SPEAKING_ORDER: 'multiAI_speakingOrder_v6_zh',
   ACTIVE_TAB: 'multiAI_activeTab_v6_zh',
-  CHAT_MESSAGES: 'multiAI_chatMessages_v6_zh'
+  CHAT_MESSAGES: 'multiAI_chatMessages_v6_zh',
+  SIDEBAR_COLLAPSED: 'multiAI_sidebarCollapsed_v6_zh',
 };
 
-const activeTab = ref(localStorage.getItem(LS_KEYS.ACTIVE_TAB) || 'provider')
-const providers = ref([])
-const publicSystemList = ref([])
-const peers = ref([]) // Will be populated by loadFromLocalStorage with defaultPeer structure
-const speakingOrder = ref([])
-const chatMessages = ref([])
-const isGenerating = ref(false)
+const activeTab = ref(localStorage.getItem(LS_KEYS.ACTIVE_TAB) || 'provider');
+const isSidebarCollapsed = ref(localStorage.getItem(LS_KEYS.SIDEBAR_COLLAPSED) === 'true' || false);
+const providers = ref([]);
+const publicSystemList = ref([]);
+const peers = ref([]);
+const speakingOrder = ref([]);
+const chatMessages = ref([]);
+const isGenerating = ref(false);
 const peerCurrentlyGenerating = ref('');
 const liveStreamDisplayContent = ref(null);
-const userMessageContent = ref('')
-const userMessageRole = ref('用户') // Default role for user input
-const chatMessagesContainer_ref = ref(null)
-const isFetchingDialogModels = ref(false)
+const userMessageContent = ref('');
+const userMessageRole = ref('用户');
+const chatMessagesContainer_ref = ref(null);
+const isFetchingDialogModels = ref(false);
 
 const defaultPeer = () => ({
   id: '',
@@ -368,31 +374,34 @@ const defaultPeer = () => ({
   systemPrompt: '',
   stream: true,
   enable: true,
-  listening: true, // Default for all peers, including observers
+  listening: true,
   listeningStartIndex: null,
   isObserver: false,
 });
 
-
 const loadFromLocalStorage = () => {
-  providers.value = JSON.parse(localStorage.getItem(LS_KEYS.PROVIDERS) || '[]')
-  publicSystemList.value = JSON.parse(localStorage.getItem(LS_KEYS.SYSTEM_PROMPTS) || '[]')
-  // Ensure all loaded peers get the default structure, especially new fields like isObserver
+  providers.value = JSON.parse(localStorage.getItem(LS_KEYS.PROVIDERS) || '[]');
+  publicSystemList.value = JSON.parse(localStorage.getItem(LS_KEYS.SYSTEM_PROMPTS) || '[]');
   peers.value = JSON.parse(localStorage.getItem(LS_KEYS.PEERS) || '[]').map(p => ({ ...defaultPeer(), ...p, listeningStartIndex: null }));
-  speakingOrder.value = JSON.parse(localStorage.getItem(LS_KEYS.SPEAKING_ORDER) || '[]')
-  chatMessages.value = JSON.parse(localStorage.getItem(LS_KEYS.CHAT_MESSAGES) || '[]').map(m => ({...m, id: m.id || Date.now() + Math.random() }))
+  speakingOrder.value = JSON.parse(localStorage.getItem(LS_KEYS.SPEAKING_ORDER) || '[]');
+  chatMessages.value = JSON.parse(localStorage.getItem(LS_KEYS.CHAT_MESSAGES) || '[]').map(m => ({...m, id: m.id || Date.now() + Math.random() }));
 };
 
 const saveToLocalStorage = (key, data) => {
   if (key === LS_KEYS.PEERS) {
     const peersToSave = data.map(p => {
-      const { listeningStartIndex, ...peerToSave } = p; // Exclude runtime state
+      const { listeningStartIndex, ...peerToSave } = p;
       return peerToSave;
     });
     localStorage.setItem(key, JSON.stringify(peersToSave));
   } else {
     localStorage.setItem(key, JSON.stringify(data));
   }
+};
+
+const toggleSidebar = () => {
+  isSidebarCollapsed.value = !isSidebarCollapsed.value;
+  localStorage.setItem(LS_KEYS.SIDEBAR_COLLAPSED, isSidebarCollapsed.value);
 };
 
 watch(activeTab, (newTab) => localStorage.setItem(LS_KEYS.ACTIVE_TAB, newTab));
@@ -402,32 +411,28 @@ watch(peers, (newData) => saveToLocalStorage(LS_KEYS.PEERS, newData), { deep: tr
 watch(speakingOrder, (newData) => saveToLocalStorage(LS_KEYS.SPEAKING_ORDER, newData), { deep: true });
 watch(chatMessages, (newData) => saveToLocalStorage(LS_KEYS.CHAT_MESSAGES, newData), { deep: true });
 
+const providerDialogVisible = ref(false);
+const editingProvider = ref(null);
+const providerFormRef = ref(null);
+const providerForm = reactive({ name: '', url: '', key: '', models: [] });
+const formModelInputVisible = ref(false);
+const formModelValue = ref('');
+const formModelInput_ref = ref(null);
 
-const providerDialogVisible = ref(false)
-const editingProvider = ref(null)
-const providerFormRef = ref(null)
-const providerForm = reactive({ name: '', url: '', key: '', models: [] })
-const formModelInputVisible = ref(false)
-const formModelValue = ref('')
-const formModelInput_ref = ref(null)
+const peerDialogVisible = ref(false);
+const editingPeer = ref(null);
+const peerFormRef = ref(null);
+const peerForm = reactive(defaultPeer());
+const availablePeerModels = ref([]);
 
-const peerDialogVisible = ref(false)
-const editingPeer = ref(null) // Stores the original peer object being edited
-const peerFormRef = ref(null)
-const peerForm = reactive(defaultPeer()) // Form data, reactive
-const availablePeerModels = ref([])
-
-
-// Computed properties for UI elements
 const enabledPeersForRoleDropdown = computed(() => peers.value.filter(p => p.enable));
 const enabledPeersForChatActions = computed(() => peers.value.filter(p => p.enable));
 const enabledPeersForSpeakingOrder = computed(() => peers.value.filter(p => p.enable));
 
-
 const getTabTitle = () => {
   const titles = { provider: '服务商配置', system: '系统提示词配置', peers: 'AI角色配置', chat: '聊天界面' }
   return titles[activeTab.value] || '多AI聊天'
-}
+};
 
 const handleMenuSelect = (index) => {
   activeTab.value = index;
@@ -441,7 +446,7 @@ const showAddProviderDialog = () => {
 };
 
 const showEditProviderDialog = (provider) => {
-  editingProvider.value = JSON.parse(JSON.stringify(provider)); // Store a copy for comparison if name changes
+  editingProvider.value = JSON.parse(JSON.stringify(provider));
   Object.assign(providerForm, JSON.parse(JSON.stringify(provider)));
   providerDialogVisible.value = true;
   nextTick(() => providerFormRef.value?.clearValidate());
@@ -455,7 +460,6 @@ const saveProvider = async () => {
       if (editingProvider.value) {
         const index = providers.value.findIndex(p => p.name === editingProvider.value.name);
         if (index !== -1) {
-          // Check for name collision only if name actually changed
           if (providerData.name !== editingProvider.value.name && providers.value.some((p, i) => i !== index && p.name === providerData.name)) {
             ElMessage.error(`服务商名称 '${providerData.name}' 已存在.`);
             return;
@@ -482,12 +486,11 @@ const removeProvider = (index) => {
     .then(() => {
       const providerName = providers.value[index].name;
       providers.value.splice(index, 1);
-      
+
       const peersToRemoveNames = peers.value.filter(peer => peer.provider === providerName).map(p => p.name);
       peers.value = peers.value.filter(peer => peer.provider !== providerName);
-      // Remove affected peers from speaking order
       speakingOrder.value = speakingOrder.value.filter(nameInOrder => !peersToRemoveNames.includes(nameInOrder));
-      
+
       ElMessage.success('服务商及关联AI角色已删除.');
     }).catch(() => {});
 };
@@ -505,7 +508,6 @@ const fetchModelsForDialog = async () => {
         const response = await axios.get(`${url}models`, { headers });
         if (response.data && response.data.data) {
             const apiModels = response.data.data.map(model => model.id);
-            // Merge and de-duplicate
             providerForm.models = [...new Set([...(providerForm.models || []), ...apiModels])];
             ElMessage.success(`模型已获取并合并到 ${providerForm.name || '当前服务商'}.`);
         } else {
@@ -519,16 +521,15 @@ const fetchModelsForDialog = async () => {
     }
 };
 
-
 const refreshProviderModels = async (provider) => {
   if (!provider.key || !provider.url) {
     ElMessage.warning('服务商URL或API密钥缺失.');
     return;
   }
-  const originalGeneratingState = isGenerating.value; // Preserve chat generating state
-  isGenerating.value = true; // Use general loading state
-  peerCurrentlyGenerating.value = `正在刷新 ${provider.name}`; // Visual feedback
-  liveStreamDisplayContent.value = ""; // Placeholder for loading
+  const originalGeneratingState = isGenerating.value;
+  isGenerating.value = true;
+  peerCurrentlyGenerating.value = `正在刷新 ${provider.name}`;
+  liveStreamDisplayContent.value = "";
   try {
     const headers = { 'Authorization': `Bearer ${provider.key}` };
     let url = provider.url;
@@ -536,7 +537,6 @@ const refreshProviderModels = async (provider) => {
     const response = await axios.get(`${url}models`, { headers });
     if (response.data && response.data.data) {
       const apiModels = response.data.data.map(model => model.id);
-      // Find the provider in the main list and update its models
       const providerInList = providers.value.find(p => p.name === provider.name);
       if (providerInList) {
         providerInList.models = [...new Set([...(providerInList.models || []), ...apiModels])];
@@ -549,7 +549,7 @@ const refreshProviderModels = async (provider) => {
     console.error("Error refreshing provider models:", error);
     ElMessage.error(`刷新模型失败: ${error.response?.data?.error?.message || error.message || '未知错误'}`);
   } finally {
-    isGenerating.value = originalGeneratingState; // Restore chat generating state
+    isGenerating.value = originalGeneratingState;
     peerCurrentlyGenerating.value = '';
     liveStreamDisplayContent.value = null;
   }
@@ -565,7 +565,7 @@ const addFormModel = () => {
     providerForm.models.push(formModelValue.value);
   }
   formModelValue.value = '';
-  formModelInputVisible.value = false; // Hide after adding or if empty
+  formModelInputVisible.value = false;
 };
 
 const removeFormModel = (index) => {
@@ -581,32 +581,28 @@ const showAddPeerDialog = () => {
     return;
   }
   editingPeer.value = null;
-  Object.assign(peerForm, defaultPeer()); // Reset form to defaults
+  Object.assign(peerForm, defaultPeer());
   availablePeerModels.value = [];
   if (providers.value.length > 0 && !peerForm.provider) {
-      // Pre-select first provider if none is set
       peerForm.provider = providers.value[0].name;
   }
-  updatePeerFormModels(); // Populate models based on pre-selected or existing provider
+  updatePeerFormModels();
   peerDialogVisible.value = true;
   nextTick(() => peerFormRef.value?.clearValidate());
 };
 
 const showEditPeerDialog = (peer) => {
-  editingPeer.value = peer; // Keep reference to original peer for ID comparison
-  // Deep copy peer data to form, ensuring all default fields are present
-  const { listeningStartIndex, ...formValues } = JSON.parse(JSON.stringify(peer)); 
+  editingPeer.value = peer;
+  const { listeningStartIndex, ...formValues } = JSON.parse(JSON.stringify(peer));
   Object.assign(peerForm, defaultPeer(), formValues);
   updatePeerFormModels();
   peerDialogVisible.value = true;
   nextTick(() => peerFormRef.value?.clearValidate());
 };
 
-
 const updatePeerFormModels = () => {
   const selectedProvider = providers.value.find(p => p.name === peerForm.provider);
   availablePeerModels.value = selectedProvider ? (selectedProvider.models || []) : [];
-  // If current model not in new list, or no model selected, pick first available, or clear
   if (availablePeerModels.value.length > 0 && !availablePeerModels.value.includes(peerForm.model)) {
     peerForm.model = availablePeerModels.value[0];
   } else if (availablePeerModels.value.length === 0) {
@@ -614,35 +610,29 @@ const updatePeerFormModels = () => {
   }
 };
 
-// No longer need to watch peerForm.isObserver to clear fields, as observers now have full config.
-// Validation rules in the dialog will handle required fields.
-
 const savePeer = async () => {
   if (!peerFormRef.value) return;
   await peerFormRef.value.validate(async (valid) => {
     if (valid) {
-      // Create a clean peer data object from the form, excluding runtime state
       const { listeningStartIndex, ...peerDataFromForm } = JSON.parse(JSON.stringify(peerForm));
-      const peerData = { ...defaultPeer(), ...peerDataFromForm, listeningStartIndex: null }; 
+      const peerData = { ...defaultPeer(), ...peerDataFromForm, listeningStartIndex: null };
 
-      if (editingPeer.value) { 
+      if (editingPeer.value) {
         const index = peers.value.findIndex(p => p.id === editingPeer.value.id);
         if (index !== -1) {
-          // Check for name collision only if name actually changed
           if (peerData.name !== peers.value[index].name && peers.value.some((p, i) => i !== index && p.name === peerData.name)) {
             ElMessage.error(`AI角色名称 '${peerData.name}' 已存在.`);
             return;
           }
           const oldPeerName = peers.value[index].name;
-          peers.value.splice(index, 1, { ...peers.value[index], ...peerData }); // Merge updates
+          peers.value.splice(index, 1, { ...peers.value[index], ...peerData });
 
-          // Update speaking order if name changed
           if (oldPeerName !== peerData.name) {
              speakingOrder.value = speakingOrder.value.map(nameInOrder => nameInOrder === oldPeerName ? peerData.name : nameInOrder);
           }
           ElMessage.success(`AI角色 '${peerData.name}' (ID: ${peerData.id}) 已更新.`);
         }
-      } else { // Adding new peer
+      } else {
         if (peers.value.some(p => p.id === peerData.id)) {
           ElMessage.error(`AI角色ID '${peerData.id}' 已存在.`);
           return;
@@ -654,10 +644,9 @@ const savePeer = async () => {
         peers.value.push(peerData);
         ElMessage.success(`AI角色 '${peerData.name}' (ID: ${peerData.id}) 已添加.`);
       }
-      // Clean up speakingOrder if a peer was disabled
       speakingOrder.value = speakingOrder.value.filter(name => {
         const p = peers.value.find(pr => pr.name === name);
-        return p && p.enable; // Observers can be in speaking order
+        return p && p.enable;
       });
 
       peerDialogVisible.value = false;
@@ -676,7 +665,6 @@ const removePeer = (peerId) => {
       if (index > -1) {
         const removedPeerName = peers.value[index].name;
         peers.value.splice(index, 1);
-        // Remove from speaking order
         speakingOrder.value = speakingOrder.value.filter(name => name !== removedPeerName);
         ElMessage.success('AI 角色已删除.');
       }
@@ -689,18 +677,18 @@ const togglePeerListening = (peerId) => {
     const oldListeningState = peer.listening;
     peer.listening = !peer.listening;
 
-    if (!oldListeningState && peer.listening) { // Just started listening
-        peer.listeningStartIndex = chatMessages.value.length; // Start listening from current point
-    } else if (oldListeningState && !peer.listening) { // Stopped listening
-        peer.listeningStartIndex = null; // Reset
+    if (!oldListeningState && peer.listening) {
+        peer.listeningStartIndex = chatMessages.value.length;
+    } else if (oldListeningState && !peer.listening) {
+        // No change to listeningStartIndex needed here,
+        // as the 'isWithinGeneralListeningWindow' check will fail if peer.listening is false.
     }
-    const listeningTarget = peer.isObserver ? "其他AI的对话进行分析" : "其他AI的对话";
+    const listeningTarget = peer.isObserver ? "其他AI对话进行分析" : "其他AI对话";
     const notListeningTarget = peer.isObserver ? "用户对话进行分析" : "用户和自身对话";
 
-    ElMessage.info(`${peer.name} ${peer.listening ? `开始聆听${listeningTarget} (从当前位置)` : `仅聆听${notListeningTarget}`}`);
+    ElMessage.info(`${peer.name} ${peer.listening ? `开始${peer.isObserver ? '' : '聆听'}${listeningTarget} (从当前位置)` : `仅${peer.isObserver ? '' : '聆听'}${notListeningTarget}`}`);
   }
 };
-
 
 const scrollToBottom = () => {
   nextTick(() => {
@@ -711,27 +699,25 @@ const scrollToBottom = () => {
 };
 
 const formatMessageContent = (content) => {
-  if (typeof content !== 'string') return '';
-  try {
-    const parsedTurns = JSON.parse(content);
-    if (Array.isArray(parsedTurns) && parsedTurns.every(turn => typeof turn === 'object' && Object.keys(turn).length === 1)) {
-      return parsedTurns.map(turn => {
-        const speaker = Object.keys(turn)[0];
-        const markdownText = turn[speaker];
-        const sanitizedSpeaker = String(speaker || '').replace(/</g, "<").replace(/>/g, ">");
-        const htmlContent = marked.parse(String(markdownText || ''));
-        return `<div><strong>${sanitizedSpeaker}:</strong> ${htmlContent}</div>`;
-      }).join('<hr class="turn-separator">');
+    if (typeof content !== 'string') return '';
+    try {
+        const parsedTurns = JSON.parse(content);
+        if (Array.isArray(parsedTurns) && parsedTurns.every(turn => typeof turn === 'object' && Object.keys(turn).length === 1)) {
+            return parsedTurns.map(turn => {
+                const speaker = Object.keys(turn)[0];
+                const markdownText = turn[speaker];
+                const sanitizedSpeaker = String(speaker || '').replace(/</g, "<").replace(/>/g, ">");
+                const htmlContent = marked.parse(String(markdownText || ''));
+                return `<div><strong>${sanitizedSpeaker}:</strong> ${htmlContent}</div>`;
+            }).join('<hr class="turn-separator">');
+        }
+    } catch (e) {
     }
-  } catch (e) { /* Not a JSON array of turns */ }
-  
-  return marked.parse(String(content || ''));
+    return marked.parse(String(content || ''));
 };
 
-// Helper to check if a role name corresponds to any configured peer
 const isConfiguredPeerMessage = (role) => peers.value.some(p => p.name === role);
-// Helper to check if a role name corresponds to an Observer peer
-const isObserverMessage = (role) => peers.value.some(p => p.name === role && p.isObserver);
+const isObserverMessage = (role) => peers.value.find(p => p.name === role)?.isObserver || false;
 
 const getGeneratingPeerIsObserver = () => {
     if (!peerCurrentlyGenerating.value) return false;
@@ -749,183 +735,186 @@ const replaceSystemPromptPlaceholders = (promptText) => {
 };
 
 const letPeerSpeak = async (peerName) => {
-  if (isGenerating.value) return;
+    if (isGenerating.value) return;
 
-  const currentPeer = peers.value.find(p => p.name === peerName); // The peer that is about to speak
-  if (!currentPeer || !currentPeer.enable) {
-    ElMessage.error(`AI角色 '${peerName}' 未找到或未启用.`);
-    return;
-  }
-  
-  const provider = providers.value.find(p => p.name === currentPeer?.provider);
-  if (!provider || !provider.url || !provider.key) {
-    ElMessage.error(`AI角色 '${peerName}' 或其服务商未正确配置 (缺少URL/密钥).`);
-    return;
-  }
+    const currentPeer = peers.value.find(p => p.name === peerName);
+    if (!currentPeer || !currentPeer.enable) {
+        ElMessage.error(`AI角色 '${peerName}' 未找到或未启用.`);
+        return;
+    }
 
-  isGenerating.value = true;
-  peerCurrentlyGenerating.value = peerName;
-  liveStreamDisplayContent.value = '';
-  scrollToBottom();
+    const provider = providers.value.find(p => p.name === currentPeer?.provider);
+    if (!provider || !provider.url || !provider.key) {
+        ElMessage.error(`AI角色 '${peerName}' 或其服务商未正确配置 (缺少URL/密钥).`);
+        return;
+    }
 
-  let accumulatedContentForFinalPush = "";
+    isGenerating.value = true;
+    peerCurrentlyGenerating.value = peerName;
+    liveStreamDisplayContent.value = '';
+    scrollToBottom();
 
-  try {
-    const finalSystemPrompt = replaceSystemPromptPlaceholders(currentPeer.systemPrompt);
-    const messagesForAPI = [{ role: 'system', content: finalSystemPrompt }];
+    let accumulatedContentForFinalPush = "";
 
-    let currentMultiTurnUserContent = []; 
+    try {
+        const finalSystemPrompt = replaceSystemPromptPlaceholders(currentPeer.systemPrompt);
+        const messagesForAPI = [{ role: 'system', content: finalSystemPrompt }];
+        let currentMultiTurnUserContent = [];
 
-    for (let i = 0; i < chatMessages.value.length; i++) {
-        const msg = chatMessages.value[i]; // Historical message
-        const msgIndex = i;
-        const msgSenderPeer = peers.value.find(p => p.name === msg.role); // Peer who sent the historical message
+        for (let i = 0; i < chatMessages.value.length; i++) {
+            const msg = chatMessages.value[i];
+            const msgIndex = i;
+            const isOwnMessage = msg.role === currentPeer.name;
 
-        // --- Context Filtering Logic ---
-        if (currentPeer.isObserver) {
-            // Observer context:
-            // 1. Exclude its own previous messages.
-            // 2. Exclude messages from other observers (optional, but good for clarity).
-            if (msgSenderPeer && msgSenderPeer.id === currentPeer.id) continue; 
-            // if (msgSenderPeer && msgSenderPeer.isObserver && msgSenderPeer.id !== currentPeer.id) continue; // Uncomment to make observers ignore other observers
-        } else {
-            // Non-Observer (regular AI) context:
-            // 1. Exclude messages from ANY observer.
-            if (msgSenderPeer && msgSenderPeer.isObserver) continue;
-        }
-        // --- End Context Filtering Logic ---
+            let includeAsUserTurn = false;
+            let includeAsAssistantTurn = false;
 
-
-        // Now, determine if the currentPeer (speaker) should "hear" this historical msg
-        const isOwnMessageForPeer = msg.role === currentPeer.name; // This historical msg was from the current speaker
-        const isMessageFromUserRole = msg.role === '用户'; // This historical msg was from the User
-
-        if (isOwnMessageForPeer) { // An AI's own past utterances (non-observers only, observers filter this above)
-            if (currentMultiTurnUserContent.length > 0) {
-                messagesForAPI.push({ role: 'user', content: JSON.stringify(currentMultiTurnUserContent) });
-                currentMultiTurnUserContent = [];
-            }
-            messagesForAPI.push({ role: 'assistant', content: msg.content });
-        } else { // Message from User or another AI (that's not an observer, or not self for observer)
-            let canHearThisMessage = false;
-            if (isMessageFromUserRole) {
-                canHearThisMessage = true; 
-            } else if (msgSenderPeer && !msgSenderPeer.isObserver) { // Message from another non-observer AI
-                if (currentPeer.listening) { // If current speaker is listening to other AIs
+            if (isOwnMessage) {
+                if (!currentPeer.isObserver) {
+                    includeAsAssistantTurn = true;
+                }
+            } else {
+                let isWithinGeneralListeningWindow = false;
+                if (currentPeer.listening) {
                     if (currentPeer.listeningStartIndex === null || msgIndex >= currentPeer.listeningStartIndex) {
-                        canHearThisMessage = true;
+                        isWithinGeneralListeningWindow = true;
+                    }
+                }
+
+                if (isWithinGeneralListeningWindow) {
+                    if (currentPeer.isObserver) {
+                        if (currentPeer.listening) { // Observer "listening to other AIs & User"
+                            includeAsUserTurn = true;
+                        } else { // Observer "listening to User only"
+                            if (msg.role === '用户') {
+                                includeAsUserTurn = true;
+                            }
+                        }
+                    } else { // Current peer is NOT an observer
+                        if (!isObserverMessage(msg.role)) { // Non-observer does not hear observer AIs
+                            includeAsUserTurn = true;
+                        }
                     }
                 }
             }
-            // Note: If msgSenderPeer is undefined (e.g. role="SystemError"), it won't be added to multi-turn.
 
-            if (canHearThisMessage) {
+            if (includeAsAssistantTurn) {
+                 if (currentMultiTurnUserContent.length > 0) {
+                    messagesForAPI.push({ role: 'user', content: JSON.stringify(currentMultiTurnUserContent) });
+                    currentMultiTurnUserContent = [];
+                }
+                messagesForAPI.push({ role: 'assistant', content: msg.content });
+            } else if (includeAsUserTurn) {
                 currentMultiTurnUserContent.push({ [msg.role]: msg.content });
             }
         }
-    }
-    if (currentMultiTurnUserContent.length > 0) {
-        messagesForAPI.push({ role: 'user', content: JSON.stringify(currentMultiTurnUserContent) });
-    }
-    
 
-    const headers = { 'Authorization': `Bearer ${provider.key}`, 'Content-Type': 'application/json' };
-    let url = provider.url;
-    if (!url.endsWith('/')) url += '/';
+        if (currentMultiTurnUserContent.length > 0) {
+            messagesForAPI.push({ role: 'user', content: JSON.stringify(currentMultiTurnUserContent) });
+        }
 
-    const payload = { model: currentPeer.model, messages: messagesForAPI, stream: currentPeer.stream };
+        const headers = { 'Authorization': `Bearer ${provider.key}`, 'Content-Type': 'application/json' };
+        let url = provider.url;
+        if (!url.endsWith('/')) url += '/';
 
-    if (currentPeer.stream) {
-      const response = await fetch(`${url}chat/completions`, { method: 'POST', headers, body: JSON.stringify(payload) });
-      if (!response.ok || !response.body) {
-        const errorBody = response.ok ? "响应体为空" : await response.text();
-        throw new Error(`API 错误 (${response.status}): ${errorBody}`);
-      }
+        const payload = { model: currentPeer.model, messages: messagesForAPI, stream: currentPeer.stream };
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
+         if (messagesForAPI.length <= 1 && messagesForAPI[0]?.role === 'system' && !messagesForAPI[0]?.content.trim() && (messagesForAPI.length === 0 || !messagesForAPI.some(m => m.role === 'user' || m.role === 'assistant'))) {
+             ElMessage.warning(`AI角色 '${peerName}' 的输入为空 (系统提示词为空且没有对话历史需要参考).`);
+             isGenerating.value = false;
+             peerCurrentlyGenerating.value = '';
+             liveStreamDisplayContent.value = null;
+             return;
+        }
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) {
-            // Process any remaining buffer content if it doesn't end with a newline
-            if (buffer.trim()) {
-                 const lines = buffer.split('\n').filter(line => line.trim() !== '');
-                 for (const line of lines) {
+
+        if (currentPeer.stream) {
+            const response = await fetch(`${url}chat/completions`, { method: 'POST', headers, body: JSON.stringify(payload) });
+            if (!response.ok || !response.body) {
+                const errorBody = response.ok ? "响应体为空" : await response.text();
+                throw new Error(`API 错误 (${response.status}): ${errorBody}`);
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                     if (buffer.trim()) {
+                         const lines = buffer.split('\n').filter(line => line.trim() !== '');
+                         for (const line of lines) {
+                            if (line.startsWith('data: ')) {
+                                const jsonStr = line.substring(5).trim();
+                                if (jsonStr !== '[DONE]') {
+                                    try {
+                                        const data = JSON.parse(jsonStr);
+                                        const deltaContent = data.choices?.[0]?.delta?.content;
+                                        if (deltaContent) {
+                                            accumulatedContentForFinalPush += deltaContent;
+                                            liveStreamDisplayContent.value = accumulatedContentForFinalPush;
+                                            scrollToBottom();
+                                        }
+                                    } catch (e) { console.warn("Stream parsing error (final):", e, jsonStr); }
+                                }
+                            }
+                         }
+                     }
+                    break;
+                }
+
+                buffer += decoder.decode(value, { stream: true });
+                let lines = buffer.split('\n');
+                buffer = lines.pop();
+
+                let shouldBreakOuterLoop = false;
+                for (const line of lines) {
                     if (line.startsWith('data: ')) {
                         const jsonStr = line.substring(5).trim();
-                        if (jsonStr !== '[DONE]') {
-                            try {
-                                const data = JSON.parse(jsonStr);
-                                const deltaContent = data.choices?.[0]?.delta?.content;
-                                if (deltaContent) {
-                                    accumulatedContentForFinalPush += deltaContent;
-                                    liveStreamDisplayContent.value += deltaContent;
-                                    scrollToBottom();
-                                }
-                            } catch (e) { console.warn("Stream parsing error (final):", e, jsonStr); }
+                        if (jsonStr === '[DONE]') {
+                            shouldBreakOuterLoop = true;
+                            break;
                         }
+                        try {
+                            const data = JSON.parse(jsonStr);
+                            const deltaContent = data.choices?.[0]?.delta?.content;
+                            if (deltaContent) {
+                                accumulatedContentForFinalPush += deltaContent;
+                                liveStreamDisplayContent.value = accumulatedContentForFinalPush;
+                                scrollToBottom();
+                            }
+                            if (data.choices?.[0]?.finish_reason) {
+                                shouldBreakOuterLoop = true;
+                            }
+                        } catch (e) { console.warn("Stream parsing error:", e, jsonStr); }
                     }
-                 }
+                }
+                if (shouldBreakOuterLoop) break;
             }
-            break;
-        }
-        
-        buffer += decoder.decode(value, { stream: true });
-        let lines = buffer.split('\n');
-        buffer = lines.pop(); // Keep the last (potentially incomplete) line in buffer
-
-        let shouldBreakOuterLoop = false;
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const jsonStr = line.substring(5).trim();
-            if (jsonStr === '[DONE]') {
-                shouldBreakOuterLoop = true;
-                break;
+        } else {
+            const response = await axios.post(`${url}chat/completions`, payload, { headers });
+            accumulatedContentForFinalPush = response.data?.choices?.[0]?.message?.content;
+             if ((accumulatedContentForFinalPush === null || accumulatedContentForFinalPush === undefined) && response.data?.error) {
+                throw new Error(`API 错误 (非流式): ${response.data.error.message || JSON.stringify(response.data.error)}`);
             }
-            try {
-              const data = JSON.parse(jsonStr);
-              const deltaContent = data.choices?.[0]?.delta?.content;
-              if (deltaContent) {
-                accumulatedContentForFinalPush += deltaContent;
-                liveStreamDisplayContent.value += deltaContent;
-                scrollToBottom();
-              }
-              if (data.choices?.[0]?.finish_reason) { // Some APIs send finish_reason before [DONE]
-                 shouldBreakOuterLoop = true;
-                 // break; // Don't break inner, process remaining lines in this chunk if any
-              }
-            } catch (e) { console.warn("Stream parsing error:", e, jsonStr); }
-          }
         }
-        if (shouldBreakOuterLoop) break;
-      }
-    } else { // Non-stream
-      const response = await axios.post(`${url}chat/completions`, payload, { headers });
-      accumulatedContentForFinalPush = response.data?.choices?.[0]?.message?.content;
-      if ((accumulatedContentForFinalPush === null || accumulatedContentForFinalPush === undefined) && response.data?.error) {
-          throw new Error(`API 错误 (非流式): ${response.data.error.message || JSON.stringify(response.data.error)}`);
-      }
-    }
 
-    if (accumulatedContentForFinalPush || accumulatedContentForFinalPush === "") {
-        chatMessages.value.push({ role: peerName, content: accumulatedContentForFinalPush, id: Date.now() + Math.random() });
-    } else if (!currentPeer.stream && (accumulatedContentForFinalPush === null || accumulatedContentForFinalPush === undefined)) {
-        ElMessage.warning(`未从 ${peerName} 收到内容.`);
-    }
+        if (accumulatedContentForFinalPush || accumulatedContentForFinalPush === "") {
+            chatMessages.value.push({ role: peerName, content: accumulatedContentForFinalPush, id: Date.now() + Math.random() });
+        } else if (!currentPeer.stream && (accumulatedContentForFinalPush === null || accumulatedContentForFinalPush === undefined)) {
+            ElMessage.warning(`未从 ${peerName} 收到内容.`);
+        }
 
-  } catch (error) {
-    console.error(`AI Error (${peerName}):`, error);
-    ElMessage.error(`AI 错误 (${peerName}): ${error.message || '未知错误'}`);
-    // Optionally add error to chat for visibility
-    // chatMessages.value.push({ role: "SystemError", content: `Error with ${peerName}: ${error.message}`, id: Date.now() + Math.random()});
-  } finally {
-    isGenerating.value = false;
-    peerCurrentlyGenerating.value = '';
-    liveStreamDisplayContent.value = null;
-    scrollToBottom();
-  }
+    } catch (error) {
+        console.error(`AI Error (${peerName}):`, error);
+        ElMessage.error(`AI 错误 (${peerName}): ${error.message || '未知错误'}`);
+    } finally {
+        isGenerating.value = false;
+        peerCurrentlyGenerating.value = '';
+        liveStreamDisplayContent.value = null;
+        scrollToBottom();
+    }
 };
 
 const sendUserMessage = () => {
@@ -950,11 +939,11 @@ const deleteLastMessage = () => {
 const autoRound = async () => {
   if (isGenerating.value || speakingOrder.value.length === 0) return;
   for (const peerName of speakingOrder.value) {
-    if (isGenerating.value) { 
+    if (isGenerating.value) {
         ElMessage.info("自动轮流已中断.");
         break;
     }
-    const peerToSpeak = peers.value.find(p => p.name === peerName && p.enable); // Observers can be in speaking order
+    const peerToSpeak = peers.value.find(p => p.name === peerName && p.enable);
     if (peerToSpeak) {
         await letPeerSpeak(peerToSpeak.name);
     } else {
@@ -967,13 +956,13 @@ const clearChat = () => {
   ElMessageBox.confirm('确定清空所有聊天记录吗?', '确认清空', { type: 'warning', confirmButtonText: '确定', cancelButtonText: '取消' })
     .then(() => {
       chatMessages.value = [];
-      // Reset listeningStartIndex for all peers if they are set to listen from current point
       peers.value.forEach(p => {
-          if (p.listening && p.listeningStartIndex !== null) { // If it was listening from a specific point
-              p.listeningStartIndex = 0; // Reset to listen from the beginning of new chat
-          } else if (!p.listening) {
-              p.listeningStartIndex = null; // Ensure it's null if not listening
+          if (p.listening && p.listeningStartIndex !== null) { // only reset if it was actively listening and had an index
+              p.listeningStartIndex = 0; // reset to start of (now empty) chat
           }
+          // if !p.listening, listeningStartIndex should remain null or its previous state.
+          // or more simply:
+          // p.listeningStartIndex = p.listening ? 0 : null;
       });
       ElMessage.success('聊天记录已清空.');
     }).catch(() => {});
@@ -987,7 +976,6 @@ onMounted(() => {
   if (publicSystemList.value.length === 0) {
     publicSystemList.value.push('你是一个有用的AI助理。');
   }
-  // Ensure speaking order only contains currently enabled peers
   speakingOrder.value = speakingOrder.value.filter(name => {
     const p = peers.value.find(pr => pr.name === name);
     return p && p.enable;
@@ -1000,12 +988,63 @@ onMounted(() => {
 <style>
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol"; margin: 0; background-color: #f4f6f8; color: #333; }
 .app-container { height: 100vh; display: flex; overflow: hidden; }
-.sidebar { background-color: #ffffff; border-right: 1px solid #e0e0e0; display: flex; flex-direction: column; box-shadow: 2px 0 5px rgba(0,0,0,0.05); }
-.logo { padding: 20px; font-size: 1.4em; font-weight: 600; text-align: center; color: #2c3e50; border-bottom: 1px solid #e0e0e0; }
-.menu { border-right: none !important; }
+.sidebar { background-color: #ffffff; border-right: 1px solid #e0e0e0; display: flex; flex-direction: column; box-shadow: 2px 0 5px rgba(0,0,0,0.05); transition: width 0.3s ease; flex-shrink: 0; }
+.sidebar.is-collapsed { width: 64px; }
+
+.logo {
+  padding: 20px;
+  font-size: 1.4em;
+  font-weight: 600;
+  text-align: center;
+  color: #2c3e50;
+  border-bottom: 1px solid #e0e0e0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 60px;
+  box-sizing: border-box;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.logo img {
+    transition: margin-right 0.3s ease;
+}
+
+.logo span {
+    transition: opacity 0.3s ease;
+}
+
+.sidebar.is-collapsed .logo span {
+    opacity: 0;
+    width: 0;
+}
+
+.toggle-sidebar-button {
+    position: absolute;
+    top: 15px;
+    right: 10px;
+    cursor: pointer;
+    font-size: 1.2em;
+    color: #666;
+    z-index: 100;
+}
+
+
+.menu { border-right: none !important; flex-grow: 1;}
 .menu .el-menu-item { font-size: 0.95em; }
-.menu .el-menu-item.is-active { background-color: #e6f7ff !important; color: #1890ff !important; }
+.menu .el-menu-item.is-active { background-color: #e6f7ff !important; color: #1a73e8 !important; }
 .menu .el-menu-item .el-icon { margin-right: 10px; }
+
+.menu.el-menu--collapse .el-menu-item {
+    padding: 0px var(--el-menu-base-level-padding) !important;
+    justify-content: center;
+}
+.menu.el-menu--collapse .el-menu-item .el-icon {
+    margin-right: 0;
+}
+
+
 .main-content-wrapper { flex-grow: 1; display: flex; flex-direction: column; background-color: #f4f6f8; }
 .header { background-color: #ffffff; border-bottom: 1px solid #e0e0e0; display: flex; align-items: center; padding: 0 20px; height: 60px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
 .header h2 { margin: 0; font-size: 1.3em; font-weight: 500; color: #333; }
@@ -1023,7 +1062,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helve
   margin-bottom: 15px;
   max-width: 85%;
 }
-.ai-message-wrapper, .observer-message-wrapper { /* Observer messages align like AI messages by default */
+.ai-message-wrapper, .observer-message-wrapper, .custom-role-message-wrapper {
   align-items: flex-start;
   margin-right: auto;
 }
@@ -1036,7 +1075,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helve
   width: 100%;
   margin-bottom: 4px;
 }
-.ai-message-wrapper .message-meta, .observer-message-wrapper .message-meta {
+.ai-message-wrapper .message-meta, .observer-message-wrapper .message-meta, .custom-role-message-wrapper .message-meta {
   text-align: left;
 }
 .user-message-wrapper .message-meta {
@@ -1056,22 +1095,28 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helve
   line-height: 1.5;
   word-break: break-word;
   box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-  max-width: 100%; 
+  max-width: 100%;
 }
 .user-message-wrapper .message-bubble {
-  background-color: #DCF8C6; 
+  background-color: #DCF8C6;
   color: #333;
 }
-.ai-message-wrapper .message-bubble { /* Regular AI */
-  background-color: #FFFFFF; 
+.ai-message-wrapper .message-bubble {
+  background-color: #FFFFFF;
   color: #333;
   border: 1px solid #eee;
 }
-.observer-message-wrapper .message-bubble, .observer-bubble { /* Observer AI */
-  background-color: #e6f7ff; /* A light blue for observers */
+.observer-message-wrapper .message-bubble, .observer-bubble {
+  background-color: #e6f7ff;
   color: #303133;
   border: 1px solid #d9ecff;
 }
+.custom-role-message-wrapper .message-bubble, .custom-role-bubble {
+  background-color: #f0f2f5;
+  color: #303133;
+  border: 1px solid #e4e7ed;
+}
+
 
 .message-content > *:first-child { margin-top: 0; }
 .message-content > *:last-child { margin-bottom: 0; }
@@ -1090,13 +1135,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helve
 .message-content a:hover { text-decoration: underline; }
 .message-content hr.turn-separator { border: 0; height: 1px; background-color: #ddd; margin: 10px 0; }
 
-
 .chat-input-area { padding: 15px 20px; border-top: 1px solid #e0e0e0; background-color: #ffffff; }
 .chat-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; align-items: center;}
 .user-input-row { display: flex; align-items: flex-end; gap: 10px; }
 .role-input { width: 180px !important; flex-shrink: 0; }
 .message-input .el-textarea__inner { border-radius: 18px; padding: 8px 15px; line-height: 1.5; }
-.send-button { height: 38px; border-radius: 18px !important; padding: 0 15px !important; }
+.send-button { height: var(--el-input-height, 40px); border-radius: 18px !important; padding: 0 15px !important; }
 .send-button .el-icon { font-size: 1.2em; }
 .el-dialog__body { padding: 20px 25px; }
 .el-form-item { margin-bottom: 18px; }
